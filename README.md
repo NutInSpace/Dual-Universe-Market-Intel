@@ -21,3 +21,4 @@ Example: buyOrderQuantity is negative for when you have placed an order. this me
 
 ### Demo: python market.py
 ![Demo](demo.PNG)
+![Demo](demo2.PNG)

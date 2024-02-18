@@ -1,5 +1,5 @@
 
-__version__ = "0.1.6.3"
+__version__ = "0.1.6.4"
 __author__= "NutInSpace"
 
 import cProfile
@@ -12,7 +12,7 @@ sortby = SortKey.CUMULATIVE
 from dash import Dash, html, dcc, callback, Output, Input, dash_table
 import dash_bootstrap_components as dbc
 import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import psutil
 import plotly.express as px
 import scipy.stats as stats
@@ -35,12 +35,17 @@ from functools import lru_cache
 import aiohttp
 import asyncio
 
+# Globals
+items_cache_json = None
+known_items = {}
+
 # Configure logging with precision in the timestamp
 logging.basicConfig(
     level=logging.INFO,  # Set the logging level to DEBUG
     format='%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s - %(funcName)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'  # Adding milliseconds for precision
 )
+
 logger = logging.getLogger(__name__)
 
 meta = [
@@ -102,7 +107,7 @@ metric_columns = [
     #{'id' : 'size', 'name' : 'Size'},
     {'id' : 'itemName', 'name' : 'Item'}, 
     {'id' : 'Sum Total', 'name' : 'Sum Total', 'format': currency, 'type': 'numeric'},
-    {'id' : 'unitPrice', 'name' : 'Value', 'format': currency, 'type': 'numeric'}
+    {'id' : 'unitPrice', 'name' : 'Mean Price Per', 'format': currency, 'type': 'numeric'}
     #{'id' : 'orderVolume', 'name' : 'Value', 'format': currency, 'type': 'numeric'}
     #{'id' : 'Min Price', 'name' : 'Minimum', 'format': currency, 'type': 'numeric'}, 
     #{'id' : 'Weighted Mean', 'name' : 'Average Price', 'format': currency, 'type': 'numeric'},
@@ -113,6 +118,8 @@ metric_columns = [
 # Regular expression pattern
 market_pattern = r'MarketOrder:\[marketId = (\d+), orderId = (\d+), itemType = (\d+), buyQuantity = (.*?), expirationDate = @\(\d+\) (.*?), updateDate = @\(\d+\) (.*?), unitPrice = Currency:\[amount = (\d+).*?](?:, ownerId = EntityId:\[(.*?)\], ownerName = (.*?))?\]'
 owner_pattern = r"ownerId = EntityId:\[playerId = (\d+) organizationId = (\d+)\] ownerName = (.+)"
+
+
 
 def parse_fix_owner(items):
     fixed = []
@@ -142,41 +149,37 @@ def parse_fix_owner(items):
 def parse_add_itemName(items):
     updated = []
     for item in items:
-        try:
-            item = list(item)
-            # itemName, index 9
-            item.append(lookupItem(item[2], 'displayNameWithSize'))
-            item = tuple(item)
-            updated.append(item)
-        except Exception as e:
-            logger.error(e)
+        item = list(item)
+        # itemName, index 9
+        item.append(lookupItem(item[2], 'displayNameWithSize'))
+        item = tuple(item)
+        updated.append(item)
     return updated
 
-# Global cache for the items data
-items_cache_json = None
-known_items = None
+def lookupItem(item_id, key='displayNameWithSize'):
+    # Use the cached value if available
+    if item_id in known_items and key in known_items[item_id]:
+        return known_items[item_id][key]
+    
+    # Load the item's display name and cache it
+    known_items[item_id] = known_items.get(item_id, {})
+    known_items[item_id][key] = fetchItem(item_id, key)
+    return known_items[item_id][key]
 
-def lookupItem(id, key='displayNameWithSize'):
-    global known_items
-    # Cache into memory
-    if known_items[id][key]:
-        return known_items[id][key]
-    else:
-        known_items[id][key] = _lookupItem(id, key)
-
-def _lookupItem(id, key='displayNameWithSize', local_file_path='items.json'):
+def fetchItem(item_id, key='displayNameWithSize', local_file_path='items.json'):
     global items_cache_json
-    # Load and cache data from the file if it's not already loaded
+    # Load the JSON file into cache if it's not already loaded
     if items_cache_json is None:
-        logger.info("loading file")
+        logger.info("Loading items from file")
         with open(local_file_path, 'r') as file:
             items_cache_json = json.load(file)
+    
+    # Search for the item in the cached data
+    for item in items_cache_json:
+        if str(item.get('id')) == str(item_id):
+            return item.get(key, f"Unknown {key}")
+    return f"Unknown {key}"  # Default return if item or key not found
 
-    # Search in the cached data
-    for search in items_cache_json:
-        if str(search.get('id')) == str(id):
-            if str(search.get(key) != None): 
-                return search.get(key, f"Unknown {key}")
 
 ''' 
 def parse_add_itemName(items):
@@ -216,7 +219,7 @@ def parse_add_marketName(items):
 
 def parse_add_orderValue(items):
     updated = []
-    logger.info(f"Updating items: {len(items)}")
+    #logger.info(f"Updating items: {len(items)}")
     for item in items:
         item = list(item)
         i = item[2] 
@@ -268,7 +271,7 @@ def process_file(file_path):
     logger.info(file_path)
     compiled_pattern = re.compile(market_pattern)
     matches = []
-    #logger.info(f"parer: reading {file_path}")
+    logger.info(f"parer: reading {file_path}")
     with open(file_path, 'r') as file:
         content = file.read()
         logger.info(f"parser: matching {file_path}")
@@ -339,43 +342,55 @@ def process_log_file(log_file, cache_folder_path):
     df['md5'] = checksum
     return df
 
-def create_dataframe_from_log_files_multithreaded(log_files, cache_folder_path):
+def create_dataframe_from_log_files_debug(log_files, cache_folder_path):
     frames = []
     
-    # Get system information
+    for log_file in log_files:
+        data = process_log_file(log_file, cache_folder_path)
+        frames.append(data)
+    return pd.concat(frames, ignore_index=True)
+
+def create_dataframe_from_log_files_multithreaded(log_files, cache_folder_path):
+    frames = []
+
+    # Dynamically set max_workers based on system resources
     cpu_count = os.cpu_count()
-    memory = psutil.virtual_memory()
-    disk_usage = psutil.disk_usage('/')
+    max_workers = min(len(log_files), cpu_count - 1 or 1)  # Reserve 1 CPU for system processes, min of 1 worker
 
-    max_workers=3
-    #with concurrent.futures.ThreadPoolExecutor() as executor:
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        logger.info("starting thread")
+        # Fetch and log system information in a non-blocking way
+        system_info_future = executor.submit(fetch_system_info)
 
-        # Log system information
-        logger.info(f"Starting thread with {max_workers} workers")
-        logger.info(f"System has {cpu_count} CPUs")
-        logger.info(f"Total memory: {memory.total / (1024 ** 3):.2f} GB")
-        logger.info(f"Available memory: {memory.available / (1024 ** 3):.2f} GB")
-        logger.info(f"Disk usage: {disk_usage.percent}%")
-        
-        # Submitting all log files to the executor
+        # Submit log file processing tasks
         future_to_file = {executor.submit(process_log_file, log_file, cache_folder_path): log_file for log_file in log_files}
-        
-        for future in concurrent.futures.as_completed(future_to_file):
+
+        # Wait for system info logging to complete
+        log_system_info(system_info_future.result())
+
+        # Process futures as they complete
+        for future in as_completed(future_to_file):
             log_file = future_to_file[future]
             try:
                 df = future.result()
                 if df is not None and not df.empty:
                     frames.append(df)
-                logger.debug(f"Processed file {os.path.basename(log_file)}")
+                logging.debug(f"Processed file {os.path.basename(log_file)}")
             except Exception as exc:
-                logger.error(f"File {os.path.basename(log_file)} generated an exception: {exc}")
+                logging.error(f"File {os.path.basename(log_file)} generated an exception: {exc}")
 
-    if frames:
-        return pd.concat(frames, ignore_index=True)
-    else:
-        return pd.DataFrame()  # Return an empty DataFrame if no frames were processed
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+def fetch_system_info():
+    memory = psutil.virtual_memory()
+    disk_usage = psutil.disk_usage('/')
+    return os.cpu_count(), memory, disk_usage
+
+def log_system_info(info):
+    cpu_count, memory, disk_usage = info
+    logging.info(f"System has {cpu_count} CPUs, " +
+                 f"Total memory: {memory.total / (1024 ** 3):.2f} GB, " +
+                 f"Available memory: {memory.available / (1024 ** 3):.2f} GB, " +
+                 f"Disk usage: {disk_usage.percent}%")
 
 def update():
     logger.info("Starting update process")
@@ -394,6 +409,7 @@ def update():
 
     # Process log files and create DataFrame
     final_df = create_dataframe_from_log_files_multithreaded(log_files, cache_folder_path)
+    #final_df = create_dataframe_from_log_files_debug(log_files, cache_folder_path)
 
     # Clean
     final_df.drop_duplicates(inplace=True, subset='orderId')
@@ -930,8 +946,8 @@ def update_trends_figure(data):
     #weighted_mean = buy_prices.groupby(['itemName', 'orderType', 'updateDateDay'])['Weighted Mean'].mean().reset_index()
 
     # Apply a moving average to the price data
-    buy_prices['Price'] = buy_prices['unitPrice'].rolling(window=window_size, min_periods=1).mean()
-    sell_prices['Price'] = sell_prices['unitPrice'].rolling(window=window_size, min_periods=1).mean()
+    buy_prices['Price'] = buy_prices['unitPrice'].rolling(window=window_size, min_periods=5).mean()
+    sell_prices['Price'] = sell_prices['unitPrice'].rolling(window=window_size, min_periods=5).mean()
     #weighted_mean['Price'] = weighted_mean['Weighted Mean'].mean()
 
     # Renaming the price columns was already done above during moving average

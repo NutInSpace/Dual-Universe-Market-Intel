@@ -1,5 +1,5 @@
 
-__version__ = "0.1.6.4"
+__version__ = "0.1.6.6"
 __author__= "NutInSpace"
 
 import cProfile
@@ -305,7 +305,8 @@ def generate_md5(filename):
 
 def process_file_data(file_data, log_file):
     df = pd.DataFrame(file_data, columns=columns)
-    df.drop_duplicates(inplace=True, subset='orderId')
+    df.sort_values(by='updateDate', ascending=False, inplace=True)
+    df.drop_duplicates(inplace=True, subset=['orderId', 'updateDate'])
     df['logId'] = os.path.basename(log_file)
     # Convert timestamp to human-readable format
     timestamp = os.path.getmtime(log_file)
@@ -333,7 +334,8 @@ def process_log_file(log_file, cache_folder_path):
     file_data = load_or_create_cache(log_file, cache_file_path)
     
     df = pd.DataFrame(file_data, columns=columns)
-    df.drop_duplicates(inplace=True, subset='orderId')
+    df.sort_values(by='updateDate', ascending=False, inplace=True)
+    df.drop_duplicates(inplace=True, subset=['orderId', 'updateDate'])
     df['logId'] = os.path.basename(log_file)
     # Convert timestamp to human-readable format
     timestamp = os.path.getmtime(log_file)
@@ -412,7 +414,8 @@ def update():
     #final_df = create_dataframe_from_log_files_debug(log_files, cache_folder_path)
 
     # Clean
-    final_df.drop_duplicates(inplace=True, subset='orderId')
+    final_df.sort_values(by='updateDate', ascending=False, inplace=True)
+    final_df.drop_duplicates(inplace=True, subset=['orderId', 'updateDate'])
 
     # Save the DataFrame
     final_df.to_csv('market_orders.csv', index=False)
@@ -933,64 +936,43 @@ def update_trends_figure(data):
         logger.error("No data for graph")
         return None
 
-    # Define a window size for the moving average
-    window_size = 6 # This is an example, you can adjust the size
+    window_size = 6  # Define a window size for the moving average
 
     # Separate data for Buy and Sell orders
     buy_orders = data[data['orderType'] == 'Buy']
     sell_orders = data[data['orderType'] == 'Sell']
 
-    # Grouping and aggregating the required columns
+    # Grouping and aggregating the required columns for mean unit price
     buy_prices = buy_orders.groupby(['itemName', 'updateDateDay'])['unitPrice'].mean().reset_index()
     sell_prices = sell_orders.groupby(['itemName', 'updateDateDay'])['unitPrice'].mean().reset_index()
-    #weighted_mean = buy_prices.groupby(['itemName', 'orderType', 'updateDateDay'])['Weighted Mean'].mean().reset_index()
 
     # Apply a moving average to the price data
-    buy_prices['Price'] = buy_prices['unitPrice'].rolling(window=window_size, min_periods=5).mean()
-    sell_prices['Price'] = sell_prices['unitPrice'].rolling(window=window_size, min_periods=5).mean()
-    #weighted_mean['Price'] = weighted_mean['Weighted Mean'].mean()
+    buy_prices['Price'] = buy_prices['unitPrice'].rolling(window=window_size, min_periods=1).mean()
+    sell_prices['Price'] = sell_prices['unitPrice'].rolling(window=window_size, min_periods=1).mean()
 
-    # Renaming the price columns was already done above during moving average
-
-    # Adding a column to indicate the type of order or metric
+    # Adding a column to indicate the type of order
     buy_prices['OrderType'] = 'Buy'
     sell_prices['OrderType'] = 'Sell'
-    #weighted_mean['OrderType'] = 'Weighted Mean'
 
     # Merging the datasets
-    final_data = pd.concat([buy_prices, sell_prices]) #weighted_mean
+    final_data = pd.concat([buy_prices, sell_prices])
 
-    # Creating the line plot
-    #fig = px.line(final_data, x='updateDateDay', y='Price', color='itemName', line_dash='OrderType',
-    #            title='Prices of Items Over Time by Order Type',
-    #            labels={'updateDateDay': 'Update Date', 'Price': 'Price ($)'},
-    #            category_orders={"OrderType": ["Buy", "Sell", "Weighted Mean"]})
-    
-    # Creating the line plot with a black background and neon colors
+    # Creating the line plot with customized appearance
     fig = px.line(final_data, x='updateDateDay', y='Price', color='itemName', line_dash='OrderType',
-                #title='Prices of Items Over Time by Order Type',
-                #labels={'updateDateDay': 'Update Date', 'Price': 'Price ($)'},
-                #text='unitPrice',
-                #connectgaps=True,
-                line_shape='linear',
-                category_orders={"OrderType": ["Buy", "Sell"]})
-    
-    #fig.update_traces(textposition="bottom right")
+                  title='Price Trends',
+                  labels={'updateDateDay': 'Update Date', 'Price': 'Price ($)'},
+                  line_shape='linear',
+                  category_orders={"OrderType": ["Buy", "Sell"]})
 
-    # Updating the layout to have a black background
-    fig.update_layout({
-        'plot_bgcolor': '#110000',
-        'paper_bgcolor': '#110000',
-        'font_color': 'lime',
-    })
+    # Updating the layout to have a black background and lime font color
+    fig.update_layout(plot_bgcolor='#110000', paper_bgcolor='#110000', font_color='lime')
                     
-
     # Customizing the color of the lines to be more neon
     fig.update_traces(line=dict(width=1.5))
-    colors = ['#00FF00', '#00EE00', '#FF00FF', '#EE00EE', '#00FFFF', '#00EEEE', '#FFFF00', '#EEEE00'] 
-    # Example neon colors: green, lighter green, magenta, lighter magenta, cyan, lighter cyan, yellow, orange
+    neon_colors = ['#00FF00', '#00EE00', '#FF00FF', '#EE00EE', '#00FFFF', '#00EEEE', '#FFFF00', '#EEEE00']
     for i, trace in enumerate(fig.data):
-        trace.line.color = colors[i % len(colors)]
+        trace.line.color = neon_colors[i % len(neon_colors)]
+    
     return fig
 
 # Run the app
